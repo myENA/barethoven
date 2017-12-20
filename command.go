@@ -25,6 +25,7 @@ type (
 	CommandConfigProviderFunc func(catalog string, apiVersion APIVersion, questionTimeout time.Duration, bvfsUpdate string, conversationProvider ConversationFactoryFunc) CommandConfig
 
 	DefaultCommandConfig struct {
+		mu                  sync.Mutex
 		catalog             string
 		apiVersion          APIVersion
 		questionTimeout     time.Duration
@@ -35,6 +36,7 @@ type (
 
 func NewCommandConfig(catalog string, apiVersion APIVersion, questionTimeout time.Duration, bvfsUpdate string, conversationFactory ConversationFactoryFunc) CommandConfig {
 	c := &DefaultCommandConfig{
+		sync.Mutex{},
 		catalog,
 		apiVersion,
 		questionTimeout,
@@ -51,24 +53,44 @@ func NewCommandConfig(catalog string, apiVersion APIVersion, questionTimeout tim
 	return c
 }
 
-func (c *DefaultCommandConfig) Catalog() string {
-	return c.catalog
+func (c DefaultCommandConfig) Catalog() string {
+	c.mu.Lock()
+	cat := c.catalog
+	c.mu.Unlock()
+	return cat
 }
 
-func (c *DefaultCommandConfig) APIVersion() APIVersion {
-	return c.apiVersion
+func (c DefaultCommandConfig) APIVersion() APIVersion {
+	c.mu.Lock()
+	av := c.apiVersion
+	c.mu.Unlock()
+	return av
 }
 
-func (c *DefaultCommandConfig) QuestionTimeout() time.Duration {
-	return c.questionTimeout
+func (c DefaultCommandConfig) QuestionTimeout() time.Duration {
+	c.mu.Lock()
+	at := c.questionTimeout
+	c.mu.Unlock()
+	return at
 }
 
-func (c *DefaultCommandConfig) BVFSUpdate() string {
-	return c.bvfsUpdate
+func (c DefaultCommandConfig) BVFSUpdate() string {
+	c.mu.Lock()
+	bu := c.bvfsUpdate
+	c.mu.Unlock()
+	return bu
 }
 
-func (c *DefaultCommandConfig) ConversationFactory() ConversationFactoryFunc {
-	return c.conversationFactory
+func (c DefaultCommandConfig) ConversationFactory() ConversationFactoryFunc {
+	c.mu.Lock()
+	var cf ConversationFactoryFunc
+	if c.conversationFactory == nil {
+		cf = NewConversation
+	} else {
+		cf = c.conversationFactory
+	}
+	c.mu.Unlock()
+	return cf
 }
 
 type (
@@ -92,8 +114,8 @@ type (
 	CommandProvider func(ctx context.Context, command string, conf CommandConfig) (Command, error)
 
 	DefaultCommand struct {
-		ctx    context.Context
 		mu     sync.Mutex
+		ctx    context.Context
 		id     uint64
 		closed bool
 
@@ -123,6 +145,7 @@ func (s *Socket) newCommand(ctx context.Context, command string) (Command, error
 		ctx,
 		command,
 		&DefaultCommandConfig{
+			sync.Mutex{},
 			s.config.DefaultCatalog,
 			s.config.DefaultAPIVersion,
 			DefaultQuestionTimeout,
@@ -170,73 +193,108 @@ func newCommand(ctx context.Context, command string, conf CommandConfig) (*Defau
 }
 
 func (c *DefaultCommand) QuestionFactory() QuestionFactoryFunc {
+	c.mu.Lock()
+	var qf QuestionFactoryFunc
 	if qp, ok := c.conversation.(QuestionFactoryProvider); ok {
-		return qp.QuestionFactory()
+		qf = qp.QuestionFactory()
 	} else {
-		return NewQuestion
+		qf = NewQuestion
 	}
+	c.mu.Unlock()
+	return qf
 }
 
 func (c *DefaultCommand) ConclusionFactory() ConclusionFactoryFunc {
+	c.mu.Lock()
+	var cf ConclusionFactoryFunc
 	if cp, ok := c.conversation.(ConclusionFactoryProvider); ok {
-		return cp.ConclusionFactory()
+		cf = cp.ConclusionFactory()
 	} else {
-		return NewConclusion
+		cf = NewConclusion
 	}
+	c.mu.Unlock()
+	return cf
 }
 
-func (c *DefaultCommand) ID() uint64 {
-	return c.id
+func (c DefaultCommand) ID() uint64 {
+	c.mu.Lock()
+	id := c.id
+	c.mu.Unlock()
+	return id
 }
 
-func (c *DefaultCommand) Command() string {
-	return c.command
+func (c DefaultCommand) Command() string {
+	c.mu.Lock()
+	cm := c.command
+	c.mu.Unlock()
+	return cm
 }
 
 func (c *DefaultCommand) Context() context.Context {
-	return c.ctx
+	c.mu.Lock()
+	if c.ctx == nil {
+		c.ctx = context.TODO()
+	}
+	ctx := c.ctx
+	c.mu.Unlock()
+	return ctx
 }
 
 func (c *DefaultCommand) Config() CommandConfig {
-	return c.config
+	c.mu.Lock()
+	conf := c.config
+	c.mu.Unlock()
+	return conf
 }
 
 func (c *DefaultCommand) Finished() <-chan struct{} {
-	return c.finished
+	c.mu.Lock()
+	if c.finished == nil {
+		c.finished = make(chan struct{})
+	}
+	f := c.finished
+	c.mu.Unlock()
+	return f
 }
 
-func (c *DefaultCommand) Closed() bool {
+func (c DefaultCommand) Closed() bool {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closed
+	b := c.closed
+	c.mu.Unlock()
+	return b
 }
 
 func (c *DefaultCommand) MessageBuffer() Message {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	l := len(c.messageBuffer)
 	tmp := make(Message, l, l)
 	copy(tmp, c.messageBuffer)
+	c.mu.Unlock()
 	return tmp
 }
 
 func (c *DefaultCommand) ResetMessageBuffer() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.messageBuffer = make(Message, 0)
+	c.mu.Unlock()
 }
 
 func (c *DefaultCommand) Spoke() <-chan Dialog {
-	return c.conversation.Spoke()
+	c.mu.Lock()
+	s := c.conversation.Spoke()
+	// TODO: do something if Spoke() returns nil...?
+	c.mu.Unlock()
+	return s
 }
 
 func (c *DefaultCommand) Speak(d Dialog) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return &ConversationConcludedError{}
-
 	}
+
+	var err error
 
 	switch d.DialogType() {
 	case DialogStatement:
@@ -245,7 +303,6 @@ func (c *DefaultCommand) Speak(d Dialog) error {
 			case SignalCommandBegin, SignalCommandOK, SignalCommandFailed, SignalInvalidCommand:
 				c.commandSignal = s
 			case SignalEOD, SignalEODPoll, SignalMainPrompt:
-				var err error
 				switch c.commandSignal {
 				case SignalCommandFailed:
 					err = &CommandFailedError{}
@@ -258,26 +315,31 @@ func (c *DefaultCommand) Speak(d Dialog) error {
 				} else {
 					c.conclude(NewConclusion(c.messageBuffer, err))
 				}
-				return sigErr
+				err = sigErr
+
+			default:
+				err = c.conversation.Speak(s)
 			}
-			return c.conversation.Speak(s)
 		} else if m, ok := d.(Message); ok {
 			c.messageBuffer = append(c.messageBuffer, m...)
-			return c.conversation.Speak(m)
+			err = c.conversation.Speak(m)
 		} else {
-			return c.conversation.Speak(d)
+			err = c.conversation.Speak(d)
 		}
 	case DialogConclusion:
-		c.conclude(d.(Conclusion))
-		return nil
-
+		err = c.conclude(d.(Conclusion))
 	default:
-		return c.conversation.Speak(d)
+		err = c.conversation.Speak(d)
 	}
+
+	c.mu.Unlock()
+
+	return err
 }
 
-func (c *DefaultCommand) conclude(conclusion Conclusion) {
-	c.conversation.Speak(conclusion)
+func (c *DefaultCommand) conclude(conclusion Conclusion) error {
+	err := c.conversation.Speak(conclusion)
 	c.closed = true
 	close(c.finished)
+	return err
 }
